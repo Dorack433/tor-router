@@ -1,0 +1,157 @@
+#!/bin/bash
+set -euo pipefail
+
+echo
+echo "Configurando tor-router (transparent proxy)"
+echo "Baseado no projeto original: https://github.com/Edu4rdSHL/tor-router"
+echo
+
+NON_TOR="192.168.1.0/24 192.168.0.0/24"
+TRANS_PORT="9040"
+
+# Detectar UID do Tor
+if command -v pacman >/dev/null; then
+  TOR_UID=$(id -u tor)
+elif command -v apt >/dev/null; then
+  TOR_UID=$(id -u debian-tor)
+elif command -v dnf >/dev/null; then
+  TOR_UID=$(id -u toranon)
+else
+  echo "Distro não suportada. Abra issue no projeto."
+  exit 1
+fi
+
+# Verificações
+if ! command -v tor >/dev/null; then
+  echo "Instale o pacote tor."
+  exit 1
+fi
+
+if ! command -v iptables >/dev/null; then
+  echo "Instale o pacote iptables."
+  exit 1
+fi
+
+if ! systemctl is-active tor.service >/dev/null; then
+  echo "Tor não está ativo. Iniciando..."
+  sudo systemctl enable tor.service
+  sudo systemctl restart tor.service
+  sleep 2
+fi
+
+# --- BACKUP E CONFIG DO TOR ----------------------------------------
+
+TORRC="/etc/tor/torrc"
+BACKUP="${TORRC}.bak2"
+
+echo "Criando backup em $BACKUP (se ainda não existir)..."
+if [ ! -f "$BACKUP" ]; then
+  sudo cp -f "$TORRC" "$BACKUP"
+fi
+
+sudo bash -c "cat > $TORRC" <<EOF
+# Configuração tor-router
+VirtualAddrNetwork 10.192.0.0/10
+AutomapHostsOnResolve 1
+TransPort 9040
+DNSPort 5353
+EOF
+
+echo "torrc configurado."
+echo
+
+# --- DESATIVAR REDE TEMPORARIAMENTE --------------------------------
+
+echo "Desativando rede temporariamente..."
+sudo systemctl stop NetworkManager || true
+sudo nmcli networking off || true
+echo
+
+# --- KERNEL / SYSCTL -----------------------------------------------
+
+echo "Aplicando configurações seguras de kernel..."
+
+sudo sysctl -w net.ipv4.ip_forward=0
+sudo sysctl -w net.ipv4.tcp_syncookies=1
+sudo sysctl -w net.ipv4.icmp_echo_ignore_broadcasts=1
+sudo sysctl -w net.ipv4.conf.all.forwarding=0
+sudo sysctl -w net.ipv4.conf.all.log_martians=1
+sudo sysctl -w net.ipv4.icmp_ignore_bogus_error_responses=1
+sudo sysctl -w net.ipv4.conf.all.rp_filter=1
+sudo sysctl -w net.ipv4.conf.all.accept_redirects=0
+sudo sysctl -w net.ipv4.conf.all.send_redirects=0
+sudo sysctl -w net.ipv4.conf.all.accept_source_route=0
+sudo sysctl -w net.ipv4.icmp_echo_ignore_all=1
+echo
+
+# --- RESET IPTABLES ------------------------------------------------
+
+echo "Limpando regras antigas..."
+sudo iptables -P INPUT ACCEPT
+sudo iptables -P FORWARD ACCEPT
+sudo iptables -P OUTPUT ACCEPT
+sudo iptables -t nat -F
+sudo iptables -F
+sudo iptables -X
+
+echo "Aplicando regras do tor-router..."
+
+sudo iptables -t nat -A OUTPUT -m owner --uid-owner "$TOR_UID" -j RETURN
+sudo iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 5353
+
+for NET in $NON_TOR 127.0.0.0/9 127.128.0.0/10; do
+  sudo iptables -t nat -A OUTPUT -d "$NET" -j RETURN
+done
+
+sudo iptables -t nat -A OUTPUT -p tcp --syn -j REDIRECT --to-ports "$TRANS_PORT"
+
+sudo iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+for NET in $NON_TOR 127.0.0.0/8; do
+  sudo iptables -A OUTPUT -d "$NET" -j ACCEPT
+done
+sudo iptables -A OUTPUT -m owner --uid-owner "$TOR_UID" -j ACCEPT
+sudo iptables -A OUTPUT -j ACCEPT
+echo
+
+# --- REINICIAR TOR -------------------------------------------------
+
+echo "Reiniciando Tor..."
+sudo systemctl restart tor.service
+sleep 2
+echo "Tor ativo."
+echo
+
+# --- REATIVAR REDE -------------------------------------------------
+
+echo "Reativando rede..."
+sudo nmcli networking on || true
+sudo systemctl start NetworkManager || true
+sudo systemctl enable NetworkManager || true
+echo
+
+# --- TESTES --------------------------------------------------------
+
+echo "Testando IP de saída (Tor e IPv4)..."
+dig +short txt ch whoami.cloudflare @1.0.0.1 || true
+curl -s checkip.amazonaws.com || true
+echo
+
+echo "Checar vazamento DNS: https://dnsleaktest.com"
+echo "Confirmar Tor: https://check.torproject.org"
+echo
+
+# --- LISTA REGRAS --------------------------------------------------
+
+echo "############ IPTABLES FILTER ############"
+sudo iptables -t filter -S
+echo
+echo "############ IPTABLES NAT ###############"
+sudo iptables -t nat -S
+echo
+echo "############ IPTABLES MANGLE ############"
+sudo iptables -t mangle -S
+echo
+echo "############ IPTABLES RAW ###############"
+sudo iptables -t raw -S
+echo
+echo "Tor-router configurado com sucesso."
