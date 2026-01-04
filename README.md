@@ -1,8 +1,3 @@
-Claro — organizei tudo em um **README.md** claro, estruturado e pronto para colocar no repositório.
-Se quiser, depois eu ajusto o tom (mais técnico, mais simples, etc.).
-
----
-
 # TOR ROUTER OTIMIZADO
 
 Um script automatizado para **rotear TODO o tráfego da sua máquina pela rede Tor**, sem configurações manuais complexas.
